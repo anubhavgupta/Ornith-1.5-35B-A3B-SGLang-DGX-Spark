@@ -73,9 +73,24 @@ All scripts use `lmsysorg/sglang:dev-cu13` (the sparkrun recipe's image), pinned
 Measured 2026-10-04 on DGX Spark (GB10, image dev-cu13 @ 035f29e9), each
 config booted from its tracked profile. Method: N simultaneous streaming
 chat requests, 512 output tokens each (greedy, `ignore_eos`, thinking off),
-mixed chat/code/math prompts with unique prefixes (no prefix-cache hits).
-Total tok/s = all output tokens / wall time; per-stream tok/s = mean decode
-rate after the first token; TTFT = mean time to first token.
+unique prompt prefixes (no prefix-cache hits). Total tok/s = all output
+tokens / wall time; per-stream tok/s = mean decode rate after the first
+token; TTFT = mean time to first token. Request *i* gets prompt *i* mod 8
+from the set being tested.
+
+- **No-spec** (`./start.sh`, `.env.no-spec`): 30 × 262K full-context
+  streams, 165 GDN slots. Best for aggregate throughput.
+- **DFlash** (`./start-dflash.sh`, `.env.dflash`, 4 draft tokens): 12 × 262K
+  full-context streams (the draft KV costs 12 KB/token), 374 GDN slots.
+  Lowest `MemAvailable` during the sweeps was 6.4 GB.
+- Accept length = generated tokens / verify steps from the Prometheus metrics.
+
+### Mixed requests (prose + code + math)
+
+8 prompts: 4 prose (explanation, essay, email, technical comparison),
+2 code (Python, Go), 2 math (equation, induction proof). At concurrency 1
+only the first prose prompt runs, so rows 1–4 lean toward prose; from 8 up
+the set is evenly covered.
 
 | Concurrency | No-spec total tok/s | No-spec per-stream | No-spec TTFT | DFlash total tok/s | DFlash per-stream | DFlash TTFT | DFlash accept len |
 |---:|---:|---:|---:|---:|---:|---:|---:|
@@ -86,15 +101,24 @@ rate after the first token; TTFT = mean time to first token.
 | 12 | —   | —  | —      | **346** | **34** | 0.24 s | 2.80 |
 | 30 | **470** | 16 | 0.38 s | — | — | — | — |
 
-- **No-spec** (`./start.sh`, `.env.no-spec`): 30 × 262K full-context
-  streams, 165 GDN slots. Best for aggregate throughput.
-- **DFlash** (`./start-dflash.sh`, `.env.dflash`, 4 draft tokens): 12 × 262K
-  full-context streams (the draft KV costs 12 KB/token), 374 GDN slots.
-  Per-stream speed is 13–35% higher than no-spec at the same concurrency;
-  lowest `MemAvailable` during the sweep was 6.4 GB.
-- Accept length = generated tokens / verify steps from the Prometheus
-  metrics. It varies with the prompt: ~2.3 for a single chat-style prompt,
-  ~2.8 with the full mixed set.
+DFlash per-stream speed is 13–35% higher than no-spec at the same concurrency.
+
+### Code-only requests
+
+8 code prompts: Python, Go, TypeScript/React, Rust, C++, SQL, Bash, Java/Spring.
+
+| Concurrency | No-spec total tok/s | No-spec per-stream | No-spec TTFT | DFlash total tok/s | DFlash per-stream | DFlash TTFT | DFlash accept len |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1  | 81  | 81 | 0.07 s | **130** | **132** | 0.07 s | 3.30 |
+| 2  | 123 | 62 | 0.12 s | **196** | **101** | 0.09 s | 3.30 |
+| 4  | 190 | 48 | 0.14 s | **259** | **73**  | 0.15 s | 3.13 |
+| 8  | 266 | 34 | 0.18 s | **364** | **49**  | 0.17 s | 3.19 |
+| 12 | —   | —  | —      | **456** | **41**  | 0.19 s | 3.14 |
+| 30 | **525** | 18 | 0.28 s | — | — | — | — |
+
+Code drafts much better (accept length ~3.1–3.3 vs ~2.3–2.8 mixed): DFlash
+per-stream speed is 46–63% higher than no-spec, and DFlash at 12 streams
+(456 tok/s) comes close to no-spec at 30 (525 tok/s).
 
 See [`numbers.md`](numbers.md) for the sweep methodology carried over from
 the Qwen3.6 setup.

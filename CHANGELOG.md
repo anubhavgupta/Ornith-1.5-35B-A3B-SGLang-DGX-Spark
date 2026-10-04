@@ -9,6 +9,10 @@ All notable changes to this project are documented here. Dates are commit dates.
   and 346 tok/s total at 12.
 - `.env.dflash` and `.env.no-spec`: every flag now has a comment explaining
   what it does. Values unchanged.
+- README: benchmark section now states the mixed prose/code/math prompt set,
+  and adds a code-only table. Code-only, DFlash reaches 132 tok/s
+  single-stream (accept length ~3.3) and 456 tok/s at 12; no-spec 525 tok/s
+  at 30.
 
 ## 2026-10-04 — `.env.no-spec`
 
