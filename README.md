@@ -4,7 +4,7 @@ Ready-to-run scripts to serve **[Ornith-1.5-35B-A3B](https://huggingface.co/orni
 
 | Script | Decode mode | Best for |
 |---|---|---|
-| `./start-dflash.sh` | **DFlash2** speculative decoding ([`DaoCloud/Ornith-1.5-35B-A3B-DFlash2-2.6B-A0.3B-NVFP4`](https://huggingface.co/DaoCloud/Ornith-1.5-35B-A3B-DFlash2-2.6B-A0.3B-NVFP4), block 7) | **Recommended to try first.** Fastest per stream at low concurrency, pending validation on this checkpoint |
+| `./start-dflash.sh` | **DFlash2** speculative decoding ([`jzinno/Ornith-1.5-35B-A3B-DFlash2`](https://huggingface.co/jzinno/Ornith-1.5-35B-A3B-DFlash2), 4 draft tokens) | **Recommended to try first.** Fastest per stream at low concurrency, pending validation on this checkpoint |
 | `./start-mtp.sh` | MTP speculative decoding (the checkpoint's built-in head, 3 steps) | Context above 262K (YaRN), which DFlash doesn't support |
 | `./start.sh` | Plain decoding (no speculation) | Many concurrent streams (dozens to hundreds) |
 
@@ -15,7 +15,7 @@ All three serve an OpenAI-compatible API on port **8888** with the model name **
 ## Requirements
 
 - DGX Spark / GB10 (aarch64, SM121) with Docker and the NVIDIA container runtime
-- About 24 GB of disk for the weights (target ≈21.8 GiB plus the DFlash draft at ≈1.7 GiB), downloaded into `./.cache/huggingface` on first start
+- About 24 GB of disk for the weights (target ≈21.8 GiB plus the DFlash draft at ≈1.0 GiB), downloaded into `./.cache/huggingface` on first start
 - Optional: `export HF_TOKEN=...` in `~/.bashrc` for faster Hub downloads
 
 ## Quick start
@@ -43,15 +43,19 @@ curl http://127.0.0.1:8888/v1/chat/completions -H 'Content-Type: application/jso
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MAX_CONCURRENT_REQUESTS` | `2` | Concurrent streams. The script sizes the GDN state pool and the KV cache cap from this. |
+| `MAX_CONCURRENT_REQUESTS` | `12` | Concurrent streams, each able to reach the full 262K at once (KV pool capped at 12 × 262144 tokens). The sparkrun recipe uses 24 sharing a smaller pool. |
 | `CONTEXT_LENGTH` | `262144` | Max context per stream (`1024..1000000`). Above 262144 needs `YARN=1` (auto at exactly 1M). Not available with DFlash. |
-| `MEM_FRACTION_STATIC` | `0.5` | Ceiling on the memory SGLang may reserve. **Keep ≤ 0.80** (see [Memory safety](#memory-safety)). |
+| `MEM_FRACTION_STATIC` | `0.92` | Ceiling on the memory SGLang may reserve (sparkrun recipe uses 0.85; 0.92 leaves ~7–8 GB `MemAvailable`, 0.93 left ~4 GB). See [Memory safety](#memory-safety). |
+| `CHUNKED_PREFILL` | `4096` | Prefill chunk size (sparkrun recipe; 8192 measured ~5% faster TTFT on a 33K prompt) |
+| `MOE_RUNNER_BACKEND` | `flashinfer_cutlass` | `auto` crashes on NVFP4 MoE on SM121 |
+| `LOAD_FORMAT` | `auto` | `fastsafetensors` (recipe) loads in ~18 s vs ~113 s but costs ~21 GB of KV/GDN pool on GB10 |
+| `DROP_CACHES` | `1` | Drop the host page cache before launch (recipe's `drop-caches`) |
 | `MODEL_ID` | `ornith-ai/Ornith-1.5-35B-A3B-NVFP4` | Target checkpoint |
-| `MAX_TOTAL_TOKENS` | auto | KV cap. Default `N × (CONTEXT_LENGTH + draft tokens)`; `0` = use everything the fraction allows. |
-| `MAMBA_POOL_MODE` | `auto` | GDN state pool sizing: `pin` (N × 4 slots) or `ratio` (computed `--mamba-full-memory-ratio`) |
+| `MAX_TOTAL_TOKENS` | auto | KV cap. Pin mode: `N × (CONTEXT_LENGTH + draft tokens)`; ratio mode (default): uncapped. |
+| `MAMBA_POOL_MODE` / `MAMBA_FULL_MEMORY_RATIO` | `fill` / `3.51` | GDN state pool sizing. `fill` caps KV at N × context and turns the rest of the budget into GDN prefix-cache slots (374 at the defaults). `auto` pins N × 4 slots at 262K. `ratio` with 3.51 (sparkrun recipe) keeps ~1000 slots for prefix caching but fits only ~8 full contexts at 0.93. |
 | `SAMPLING_TEMPERATURE` / `_TOP_P` / `_TOP_K` / `_MIN_P` / `_REPETITION_PENALTY` | `0.6` / `0.95` / `20` / `0.0` / `1.0` | Server default sampling. Applied by mounting a patched `generation_config.json` into the container; the host cache isn't changed. |
 | `CHAT_TEMPLATE_KWARGS` | `{"preserve_thinking": true}` | Server default chat-template kwargs; keys the client sends win |
-| `DF_BLOCK_SIZE` | `7` | DFlash draft tokens per step (matches the draft's trained `block_size`; not yet swept on this box) |
+| `DF_BLOCK_SIZE` | `4` | DFlash draft tokens per step (4 vs 10 at concurrency 1: 10 is ~4% faster on average but ~15% slower on chat/prose) |
 | `MTP_STEPS` / `MTP_DRAFT` | `3` / `4` | MTP chain length (carried over from the Qwen3.6 setup; not yet swept for this checkpoint) |
 | `EXTRA_ARGS` | — | Extra SGLang flags, appended last |
 | `DOCKER_ENV` | — | Extra container env, e.g. `SGLANG_FLASHINFER_WORKSPACE_SIZE=1073741824` (needed for spec modes above ~150 streams) |
@@ -60,7 +64,7 @@ On every start, the script prints the derived state pool and KV cache sizes, and
 
 ## Image
 
-All scripts use the official SGLang nightly, pinned by digest: `lmsysorg/sglang@sha256:00205b89…` (= `nightly-cu134-20260909-708f51e`). It's pulled automatically on first run.
+All scripts use `lmsysorg/sglang:dev-cu13` (the sparkrun recipe's image), pinned by digest: `lmsysorg/sglang@sha256:035f29e9…` (main `65f759144`, 2026-10-02). With `LOAD_FORMAT=fastsafetensors`, the loader is pip-installed into the container at launch (the image doesn't ship it). It's pulled automatically on first run.
 
 > ⚠️ Do **not** use the older `lmsysorg/sglang:qwen38-27b` image with this checkpoint. Ornith's `lm_head` is also quantized (`W4A16_NVFP4`, per `hf_quant_config.json`); the older image is known to drop quantized `lm_head` scales on load for a related checkpoint, producing garbage output. Validate on first boot.
 
@@ -72,7 +76,7 @@ Not yet run for this checkpoint — see [`numbers.md`](numbers.md) for the sweep
 
 GB10's GPU and OS share one memory pool, and **GPU allocations can't be swapped**. The Qwen3.6 setup this repo is based on hard-froze the box twice at `MEM_FRACTION_STATIC=0.95` with spec modes at their maximum concurrency — assume the same risk applies here until this checkpoint has its own capacity sweep.
 
-- **Keep `MEM_FRACTION_STATIC` ≤ 0.80**, and set `MAX_CONCURRENT_REQUESTS` conservatively until you've swept max safe concurrency for this checkpoint.
+- The defaults (`MEM_FRACTION_STATIC=0.92`, 12 full-context streams) are above the 0.80 ceiling the Qwen3.6 setup used. Boot leaves ~7–8 GB `MemAvailable` (0.93 left only ~4 GB); drop to 0.80 if the box gets tight.
 - **Before high-concurrency experiments**, run a watchdog that does `docker kill` when `MemAvailable` drops below ~3 GB.
 
 ## Files
@@ -87,7 +91,7 @@ GB10's GPU and OS share one memory pool, and **GPU allocations can't be swapped*
 
 ## Links
 
-- [ornith-ai/Ornith-1.5-35B-A3B-NVFP4](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-NVFP4) · [DFlash2 draft](https://huggingface.co/DaoCloud/Ornith-1.5-35B-A3B-DFlash2-2.6B-A0.3B-NVFP4) · [SGLang docs](https://docs.sglang.io)
+- [ornith-ai/Ornith-1.5-35B-A3B-NVFP4](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-NVFP4) · [DFlash2 draft](https://huggingface.co/jzinno/Ornith-1.5-35B-A3B-DFlash2) · [SGLang docs](https://docs.sglang.io)
 
 ## Credits
 
@@ -96,4 +100,4 @@ GB10's GPU and OS share one memory pool, and **GPU allocations can't be swapped*
 - **[SGLang](https://github.com/sgl-project/sglang):** the serving engine, including DFlash2, MTP/EAGLE, the hybrid GDN radix cache and the quantized `lm_head` support this setup depends on.
 - **Model owners:**
   - [ornith-ai](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-NVFP4) for Ornith-1.5-35B-A3B and its NVFP4 quantization
-  - [DaoCloud](https://huggingface.co/DaoCloud/Ornith-1.5-35B-A3B-DFlash2-2.6B-A0.3B-NVFP4) for the DFlash2 draft model
+  - [jzinno](https://huggingface.co/jzinno/Ornith-1.5-35B-A3B-DFlash2) for the DFlash2 draft model

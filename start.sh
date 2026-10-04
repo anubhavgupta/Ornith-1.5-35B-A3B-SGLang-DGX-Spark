@@ -12,8 +12,8 @@ set -euo pipefail
 #   - ornith-ai ModelOpt NVFP4 export (mixed-precision: FP8 attention/GDN
 #     projections, NVFP4 MoE experts; vision tower left unquantized).
 #     Override the checkpoint with MODEL_ID=<hf repo>.
-#   - DGX Spark specifics: 128GB unified memory; 8192-token prefill
-#     chunks, --mem-fraction-static ${MEM_FRACTION_STATIC} (default 0.5) and --disable-prefill-cuda-graph.
+#   - DGX Spark specifics: 128GB unified memory; 4096-token prefill
+#     chunks, --mem-fraction-static ${MEM_FRACTION_STATIC} (default 0.92; sparkrun recipe uses 0.85) and --disable-prefill-cuda-graph.
 #   - --attention-backend flashinfer is required on SM120/SM121
 #     (trtllm_mha is SM100-only).
 #   - KV cache is explicitly FP8 (--kv-cache-dtype fp8_e4m3). The
@@ -49,12 +49,15 @@ set -euo pipefail
 #       r* = S x token_equiv / L  (D=0, no spec; dcp=1)
 #          = 1.57 @ L=8K, 0.39 @ 32K, 0.098 @ 128K, 0.049 @ 262K
 #     start.sh applies the skill at launch (see the "GDN state pool"
-#     block below), so changing MAX_CONCURRENT_REQUESTS / CONTEXT_LENGTH /
-#     MAMBA_AVG_CONTEXT_LEN / MEM_FRACTION_STATIC re-derives the pool:
-#     it pins --max-mamba-cache-size = concurrency x S when the
+#     block below) when MAMBA_POOL_MODE=auto: it pins
+#     --max-mamba-cache-size = concurrency x S when the
 #     concurrency cap binds (or r* < 0.15), else passes
-#     --mamba-full-memory-ratio r* (memory binds). MAMBA_POOL_MODE=
-#     pin|ratio forces either. SGLang ignores the ratio when the pin is set.
+#     --mamba-full-memory-ratio r* (memory binds). The default,
+#     MAMBA_POOL_MODE=fill, caps KV at concurrency x context and turns the
+#     rest of the budget into extra GDN slots. MAMBA_POOL_MODE=ratio passes
+#     MAMBA_FULL_MEMORY_RATIO instead (3.51 = sparkrun recipe: ~1000 GDN
+#     slots for prefix caching, but only ~8 full 262K contexts at 0.93).
+#     SGLang ignores the ratio when the pin is set.
 #     S=4 for extra_buffer_lazy + overlap scheduler (base 3 + lazy 1);
 #     S=3 with MAMBA_SKIP_DECODE_LOCK=1 (sets
 #     SGLANG_OPT_MAMBA_SKIP_DECODE_LOCK, freeing one resident slot per
@@ -94,13 +97,25 @@ MODEL_ID="${MODEL_ID:-ornith-ai/Ornith-1.5-35B-A3B-NVFP4}"
 # YaRN controlled explicitly by YARN (0|1), plus auto-on at exactly 1M.
 YARN="${YARN:-0}"
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-262144}"
-MAX_CONCURRENT_REQUESTS="${MAX_CONCURRENT_REQUESTS:-2}"
+MAX_CONCURRENT_REQUESTS="${MAX_CONCURRENT_REQUESTS:-12}"
 
-CHUNKED_PREFILL="${CHUNKED_PREFILL:-8192}"
+CHUNKED_PREFILL="${CHUNKED_PREFILL:-4096}"
 # 1 = set SGLANG_OPT_MAMBA_SKIP_DECODE_LOCK in the container (frees one
 # GDN state slot per running request; S 4 -> 3). 0 = stock locking.
 MAMBA_SKIP_DECODE_LOCK="${MAMBA_SKIP_DECODE_LOCK:-0}"
-MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-0.5}"
+# sparkrun recipe value. The repo's earlier ceiling was 0.80 (GB10 froze
+# at 0.95); watch MemAvailable on first boots at high concurrency.
+MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-0.92}"
+# Weight loader. auto = SGLang's default (~113 s target load, 24.4 GB).
+# fastsafetensors (sparkrun recipe, GDS off; pip-installed at container
+# start, pip cache under .cache/pip) loads in ~18 s but measured 45 GB for
+# the target on GB10 (+21 GB that comes out of the KV/GDN pools), so it is
+# opt-in: LOAD_FORMAT=fastsafetensors.
+LOAD_FORMAT="${LOAD_FORMAT:-auto}"
+# 1 = drop the host page cache (sync; echo 3 > /proc/sys/vm/drop_caches,
+# from the privileged container) right before launch, so SGLang's free-
+# memory probe sees the unified memory the page cache was holding.
+DROP_CACHES="${DROP_CACHES:-1}"
 # Server-side default sampling, used when a request omits a value (a value
 # sent by the client always wins). Defaults = the model card's "thinking
 # mode, precise coding" profile. SGLang reads defaults from the model's
@@ -123,8 +138,19 @@ CHAT_TEMPLATE_KWARGS="${CHAT_TEMPLATE_KWARGS:-{\"preserve_thinking\": true\}}"
 # GDN state-pool sizing (sglang compute-mamba-ratio skill), see header:
 #   auto  = pin when the concurrency cap binds or r* < 0.15, else ratio r*
 #   pin   = always --max-mamba-cache-size = concurrency x S
-#   ratio = always --mamba-full-memory-ratio r*
-MAMBA_POOL_MODE="${MAMBA_POOL_MODE:-auto}"
+#   fill  = KV capped at concurrency x CONTEXT_LENGTH (every request can be
+#           at full context); every GiB left in the budget becomes extra
+#           GDN slots for the prefix cache (default)
+#   ratio = always --mamba-full-memory-ratio MAMBA_FULL_MEMORY_RATIO
+#           (default 3.51, sparkrun recipe; "auto" = computed r*)
+MAMBA_POOL_MODE="${MAMBA_POOL_MODE:-fill}"
+MAMBA_FULL_MEMORY_RATIO="${MAMBA_FULL_MEMORY_RATIO:-3.51}"
+# fill mode: SGLang's activation/CUDA-graph reserve inside the static budget
+# (measured 2026-10-04, DFlash D4, 0.93: est. 87.91 GiB post-weight budget vs
+# 80.83 GiB of KV + GDN pools allocated) and a safety margin so the KV pool
+# still reaches its cap.
+POOL_OVERHEAD_GIB="${POOL_OVERHEAD_GIB:-7.1}"
+FILL_MARGIN_GIB="${FILL_MARGIN_GIB:-0.5}"
 # L in the skill formula: average context (input + output) per request.
 # Defaults to CONTEXT_LENGTH (worst case: every request uses the full window).
 MAMBA_AVG_CONTEXT_LEN="${MAMBA_AVG_CONTEXT_LEN:-}"
@@ -179,10 +205,12 @@ fi
 # efficiency cores are 0-4, 10-14). Keeps scheduler/tokenizer Python off
 # the 2.8GHz little cores. Empty = no pinning.
 CPUSET="${CPUSET:-5-9,15-19}"
+# MoE runner. `auto` resolves to flashinfer_trtllm on SM121 with this image,
+# which crashes on NVFP4 MoE ("Unsupported moe_runner_backend for NVFP4 MoE").
+MOE_RUNNER_BACKEND="${MOE_RUNNER_BACKEND:-flashinfer_cutlass}"
 # Free-form extra SGLang server flags, appended LAST so argparse's
 # last-wins rule lets them override anything above. Experiments go here:
 #   EXTRA_ARGS="--enable-fused-qk-norm-rope" ./start.sh
-#   EXTRA_ARGS="--moe-runner-backend flashinfer_cutlass" ./start.sh
 # 1 = enable prefill CUDA graphs (default 0 = recipe's --disable-prefill-
 # cuda-graph; SM121 boot test before trusting).
 PREFILL_CUDA_GRAPH="${PREFILL_CUDA_GRAPH:-0}"
@@ -232,13 +260,13 @@ if (( NEED_YARN )); then
   (( YARN_FACTOR < 1 )) && YARN_FACTOR=1
   YARN_OVERRIDE=$(printf '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": %s, "original_max_position_embeddings": 262144}}}' "${YARN_FACTOR}")
   CONTEXT_ARGS=(--json-model-override-args "${YARN_OVERRIDE}" --context-length "${CONTEXT_LENGTH}")
-  ALLOW_LONGER_ARGS=(-e SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1)
   YARN_SUFFIX=" (YaRN factor ${YARN_FACTOR})"
 else
   CONTEXT_ARGS=(--context-length "${CONTEXT_LENGTH}")
-  ALLOW_LONGER_ARGS=()
   YARN_SUFFIX=""
 fi
+# Always set (sparkrun recipe); required for YaRN contexts above 262K.
+ALLOW_LONGER_ARGS=(-e SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1)
 
 
 # GDN state pool (compute-mamba-ratio skill). S = state slots per running
@@ -284,7 +312,7 @@ if awk -v r="${MAMBA_REST_GIB}" 'BEGIN{exit !(r <= 0)}'; then
   echo "MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC} leaves no memory after ~${WEIGHTS_GIB}+${DRAFT_WEIGHTS_GIB} GiB of weights"; exit 1
 fi
 case "${MAMBA_POOL_MODE}" in
-  pin|ratio) : ;;
+  pin|ratio|fill) : ;;
   auto)
     if (( MAX_CONCURRENT_REQUESTS <= MAMBA_MEM_CONC )) \
        || awk -v r="${MAMBA_RATIO}" 'BEGIN{exit !(r < 0.15)}'; then
@@ -292,13 +320,32 @@ case "${MAMBA_POOL_MODE}" in
     else
       MAMBA_POOL_MODE=ratio
     fi ;;
-  *) echo "MAMBA_POOL_MODE must be auto|pin|ratio, got '${MAMBA_POOL_MODE}'"; exit 1 ;;
+  *) echo "MAMBA_POOL_MODE must be auto|pin|fill|ratio, got '${MAMBA_POOL_MODE}'"; exit 1 ;;
 esac
-if [[ "${MAMBA_POOL_MODE}" == "pin" ]]; then
+if [[ "${MAMBA_POOL_MODE}" == "fill" ]]; then
+  # Slots = (budget - overhead - margin - capped KV - D intermediate states
+  # per running request (+1 padding)) / slot size, minus the padding slot;
+  # never below the pin floor (concurrency x S).
+  MAMBA_PIN_FLOOR=$(( MAX_CONCURRENT_REQUESTS * MAMBA_SLOTS_PER_REQ ))
+  read -r MAMBA_CACHE_SIZE MAMBA_FILL_GIB < <(awk \
+    -v rest="${MAMBA_REST_GIB}" -v oh="${POOL_OVERHEAD_GIB}" -v m="${FILL_MARGIN_GIB}" \
+    -v N="${MAX_CONCURRENT_REQUESTS}" -v C="${CONTEXT_LENGTH}" -v D="${SPEC_DRAFT_TOKENS}" \
+    -v kv="${KV_BYTES_PER_TOKEN}" -v dkv="${DRAFT_KV_BYTES_PER_TOKEN}" -v st="${MAMBA_STATE_BYTES_PER_SLOT}" \
+    -v floor="${MAMBA_PIN_FLOOR}" 'BEGIN{
+      G = 1073741824
+      left = rest - oh - m - N * (C + D) * (kv + dkv) / G - (N + 1) * D * st / G
+      n = int(left * G / st) - 1
+      if (n < floor) n = floor
+      printf "%d %.2f\n", n, n * st / G
+    }')
+  MAMBA_POOL_ARGS=(--max-mamba-cache-size "${MAMBA_CACHE_SIZE}")
+  MAMBA_POOL_DESC="fill: ${MAMBA_CACHE_SIZE} slots (~${MAMBA_FILL_GIB} GiB; ${MAMBA_PIN_FLOOR} for ${MAX_CONCURRENT_REQUESTS} x S=${MAMBA_SLOTS_PER_REQ}, rest prefix cache)"
+elif [[ "${MAMBA_POOL_MODE}" == "pin" ]]; then
   MAMBA_CACHE_SIZE=$(( MAX_CONCURRENT_REQUESTS * MAMBA_SLOTS_PER_REQ ))
   MAMBA_POOL_ARGS=(--max-mamba-cache-size "${MAMBA_CACHE_SIZE}")
   MAMBA_POOL_DESC="pinned ${MAMBA_CACHE_SIZE} slots (${MAX_CONCURRENT_REQUESTS} x S=${MAMBA_SLOTS_PER_REQ})"
 else
+  [[ "${MAMBA_FULL_MEMORY_RATIO}" != "auto" ]] && MAMBA_RATIO="${MAMBA_FULL_MEMORY_RATIO}"
   MAMBA_POOL_ARGS=(--mamba-full-memory-ratio "${MAMBA_RATIO}")
   MAMBA_POOL_DESC="ratio ${MAMBA_RATIO} (memory binds: ~${MAMBA_MEM_CONC} concurrent at L=${MAMBA_L})"
 fi
@@ -307,7 +354,7 @@ if (( MAX_CONCURRENT_REQUESTS > MAMBA_MEM_CONC )); then
   echo "         SGLang will clamp/retract above that (lower MAX_CONCURRENT_REQUESTS or MAMBA_AVG_CONTEXT_LEN, or raise MEM_FRACTION_STATIC)"
 fi
 if [[ -z "${MAX_TOTAL_TOKENS}" ]]; then
-  if [[ "${MAMBA_POOL_MODE}" == "pin" ]]; then
+  if [[ "${MAMBA_POOL_MODE}" == "pin" || "${MAMBA_POOL_MODE}" == "fill" ]]; then
     # + D per request: the speculative verify block is allocated on top of
     # a request's committed tokens.
     MAX_TOTAL_TOKENS=$(( MAX_CONCURRENT_REQUESTS * (CONTEXT_LENGTH + SPEC_DRAFT_TOKENS) ))
@@ -330,18 +377,18 @@ if (( MAX_TOTAL_TOKENS > 0 )); then
 fi
 
 SERVED_MODEL_NAME="ornith-1.5-35b-a3b-sglang"
-# Image: official lmsysorg/sglang nightly (main 708f51e44, 2026-09-09),
-# pinned by multi-arch index digest; docker pulls it on first run (same
+# Image: lmsysorg/sglang:dev-cu13 (sparkrun recipe; main 65f759144,
+# 2026-10-02), pinned by multi-arch index digest; docker pulls it on first run (same
 # image start-dflash.sh uses). Do NOT use the older lmsysorg/sglang:qwen38-27b
 # for this checkpoint: it quantizes lm_head (W4A16_NVFP4, group size 16,
 # per hf_quant_config.json — a different scheme than Qwen3.6's Unsloth FP8
 # lm_head, but the same failure mode is plausible), and that older image
 # is known to drop lm_head's weight_scale on load for quantized lm_heads
 # ("Parameter lm_head.weight_scale not found in params_dict"), producing
-# garbage logits (output collapses into one repeated word). The nightly
+# garbage logits (output collapses into one repeated word). This image
 # carries the quantized-lm_head support (sglang #35496). Validate on first
 # boot; IMAGE=<ref> overrides.
-IMAGE="${IMAGE:-lmsysorg/sglang@sha256:00205b89f74691f76a0ffbd6846376d9323971930a5d59bf63a65dadc7d67927}"
+IMAGE="${IMAGE:-lmsysorg/sglang@sha256:035f29e91cfdf3b7d031c28be43ef7bddc93bb1f025e35c02c62ac732b8ba59b}"
 CONTAINER_NAME="ornith-1.5-35b-a3b-sglang"
 HOST="0.0.0.0"
 PORT="8888"
@@ -434,6 +481,16 @@ PIN_ARGS=()
 [[ -n "${CPUSET}" ]] && PIN_ARGS=(--cpuset-cpus "${CPUSET}")
 PREFILL_GRAPH_ARGS=(--disable-prefill-cuda-graph)
 [[ "${PREFILL_CUDA_GRAPH}" == "1" ]] && PREFILL_GRAPH_ARGS=()
+LOAD_ARGS=()
+PRELAUNCH=""
+if [[ "${LOAD_FORMAT}" == "fastsafetensors" ]]; then
+  LOAD_ARGS=(--load-format fastsafetensors --model-loader-extra-config '{"enable_gds": false}')
+  PRELAUNCH+='python3 -c "import fastsafetensors" 2>/dev/null || python3 -m pip install -q fastsafetensors || exit 1; '
+elif [[ "${LOAD_FORMAT}" != "auto" ]]; then
+  LOAD_ARGS=(--load-format "${LOAD_FORMAT}")
+fi
+[[ "${DROP_CACHES}" == "1" ]] && PRELAUNCH+='sync; echo 3 > /proc/sys/vm/drop_caches || echo "warning: drop_caches failed"; '
+mkdir -p "${WORK_DIR}/.cache/pip"
 
 docker run -d \
   --name "${CONTAINER_NAME}" \
@@ -452,9 +509,13 @@ docker run -d \
   -v "${HF_HOME}:/root/.cache/huggingface" \
   "${SAMPLING_MOUNT_ARGS[@]}" \
   -v "${TRITON_CACHE_DIR}:/root/.triton" \
+  -v "${WORK_DIR}/.cache/pip:/root/.cache/pip" \
+  --entrypoint bash \
   "${IMAGE}" \
+  -c "${PRELAUNCH}"'exec "$@"' bash \
   python3 -m sglang.launch_server \
   --model-path "${MODEL_ID}" \
+  "${LOAD_ARGS[@]}" \
   --served-model-name "${SERVED_MODEL_NAME}" \
   --trust-remote-code \
   --mem-fraction-static "${MEM_FRACTION_STATIC}" \
@@ -463,6 +524,7 @@ docker run -d \
   --chunked-prefill-size "${CHUNKED_PREFILL}" \
   "${PREFILL_GRAPH_ARGS[@]}" \
   --kv-cache-dtype fp8_e4m3 \
+  --moe-runner-backend "${MOE_RUNNER_BACKEND}" \
   --mamba-ssm-dtype bfloat16 \
   --mamba-radix-cache-strategy "${MAMBA_RADIX_STRATEGY}" \
   "${MAMBA_POOL_ARGS[@]}" \

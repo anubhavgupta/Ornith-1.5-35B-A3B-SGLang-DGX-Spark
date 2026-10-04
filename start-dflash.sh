@@ -3,11 +3,11 @@ set -euo pipefail
 
 # DFlash2 wrapper. Serves the start.sh target (default
 # ornith-ai/Ornith-1.5-35B-A3B-NVFP4, override with MODEL_ID) with the DFlash2
-# block-diffusion draft DaoCloud/Ornith-1.5-35B-A3B-DFlash2-2.6B-A0.3B-NVFP4
-# (trained against ornith-ai/Ornith-1.5-35B-A3B; 3 sliding-window
-# self-attn layers, block size 7, MoE draft FFN (256 experts / 8 active),
-# ~1.7 GiB NVFP4-quantized on disk — see config.json's
-# transformer_layer_config / draft_ffn_type), by injecting the spec flags
+# block-diffusion draft jzinno/Ornith-1.5-35B-A3B-DFlash2
+# (trained against ornith-ai/Ornith-1.5-35B-A3B; 6 sliding-window
+# self-attn layers / 8 KV heads, 16-token training block, dense FFN,
+# ~0.98 GiB BF16 on disk — see its config.json; the model card's
+# SGLang recipe uses 10 draft tokens), by injecting the spec flags
 # via EXTRA_ARGS (appended last, argparse last-wins) and telling
 # start.sh's pool math about the draft (SPEC_DRAFT_TOKENS,
 # DRAFT_KV_BYTES_PER_TOKEN, DRAFT_WEIGHTS_GIB).
@@ -18,22 +18,24 @@ set -euo pipefail
 # aux-hidden capture, and extra_buffer_lazy support for DFLASH verify
 # (#34763), so the target keeps start.sh's extra_buffer_lazy strategy
 # (set DF_MAMBA_STRATEGY=extra_buffer to fall back to the strategy the
-# 27B setup was validated with). NOTE: this draft's own config differs
-# from the Qwen3.6-35B-A3B draft this image was validated against (3
-# layers / 4 KV heads here vs 6 layers / 8 KV heads there, and an MoE
-# rather than dense draft FFN) — validate end-to-end on first boot.
+# 27B setup was validated with; the draft's model card was evaluated with
+# extra_buffer on SGLang 710267dc4). NOTE: validate end-to-end on first
+# boot with this image.
 # Override with IMAGE=<ref>.
 # Memory: --mem-fraction-static comes from MEM_FRACTION_STATIC (start.sh
-# default 0.5). Never go above 0.90 on GB10: 0.95 hard-rebooted the box
+# default 0.90). Do not go above 0.93 on GB10: 0.95 hard-rebooted the box
 # once at draft-graph capture, and the cookbook pins 0.80 because 0.85
 # trips DGX OS earlyoom.
 # Draft KV: without a draft window the draft pool aliases the target's
-# token slots, costing 3 layers x 4 KV heads x 128 x 2 x 1 B (fp8, follows
-# --kv-cache-dtype) = 3 KB per token on top of the target's 10 KB.
-# DF_DRAFT_WINDOW=<n> (>= 7; the draft's own sliding window is 2048)
-# enables SGLang's compact draft KV cache, bounding draft KV per request.
+# token slots, costing 6 layers x 8 KV heads x 128 x 2 x 1 B (fp8, follows
+# --kv-cache-dtype) = 12 KB per token on top of the target's 10 KB.
+# DF_DRAFT_WINDOW=<n> (>= DF_BLOCK_SIZE; the draft's own sliding window is
+# 4096) enables SGLang's compact draft KV cache. Off by default: on this
+# image the full-size draft pool is still allocated (measured 2026-10-04:
+# 25.5 GB draft KV for 2.23M tokens with window 4096), so it saves no
+# memory and decodes up to ~5% slower at D4.
 # DF_DRAFT_ATTN=<backend> overrides the draft attention backend (default:
-# the target's flashinfer). fa4 forces a BF16 draft KV (6 KB/token) and is
+# the target's flashinfer). fa4 forces a BF16 draft KV (24 KB/token) and is
 # untested on SM121.
 # YaRN: the draft inherits --json-model-override-args, so start.sh refuses
 # CONTEXT_LENGTH > 262144 while a draft is configured.
@@ -44,8 +46,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HF_CACHE="${SCRIPT_DIR}/.cache/huggingface/hub"
 mkdir -p "${HF_CACHE}"
 
-DRAFT_MODEL="${DRAFT_MODEL:-DaoCloud/Ornith-1.5-35B-A3B-DFlash2-2.6B-A0.3B-NVFP4}"
-DRAFT_REVISION="${DRAFT_REVISION:-ec736c35cde2b4021f00ee31ec218195a1ff5937}"
+DRAFT_MODEL="${DRAFT_MODEL:-jzinno/Ornith-1.5-35B-A3B-DFlash2}"
+DRAFT_REVISION="${DRAFT_REVISION:-9b4852c05fd00b672b7434b1bb105bc03c8682b0}"
 
 snapshot_present() {
   local base="${HF_CACHE}/models--${1//\//--}"
@@ -60,16 +62,17 @@ fi
 export HF_TOKEN
 
 # Official image, pinned by the multi-arch index digest (docker resolves the
-# linux/arm64 child). Upstream build: main commit 708f51e44 (2026-09-09),
-# nightly-cu134-20260909-708f51e — the first arm64 line carrying sglang
+# linux/arm64 child). Upstream build: main commit 65f759144 (2026-10-02),
+# dev-cu13 as of 2026-10-03 (sparkrun recipe image; was
+# nightly-cu134-20260909-708f51e, the first arm64 line carrying sglang
 # #35255 (zombie-request fix; dev-qwen38-27b-dflash2 predates it, and
-# v0.5.19 was tagged before it). To bump: `docker buildx imagetools
+# v0.5.19 was tagged before it)). To bump: `docker buildx imagetools
 # inspect lmsysorg/sglang:<tag>` prints the index digest;
 # update IMAGE_DIGEST, then re-validate on the box before trusting numbers.
 IMAGE_REPO="lmsysorg/sglang"
-IMAGE_TAG="nightly-cu134-20260909-708f51e"
-IMAGE_DIGEST="sha256:00205b89f74691f76a0ffbd6846376d9323971930a5d59bf63a65dadc7d67927"
-IMAGE_UPSTREAM_COMMIT="708f51e44"
+IMAGE_TAG="dev-cu13"
+IMAGE_DIGEST="sha256:035f29e91cfdf3b7d031c28be43ef7bddc93bb1f025e35c02c62ac732b8ba59b"
+IMAGE_UPSTREAM_COMMIT="65f759144"
 IMAGE="${IMAGE:-${IMAGE_REPO}@${IMAGE_DIGEST}}"
 LEGACY_IMAGE="lmsysorg/sglang:qwen38-27b-dflash2"   # the retired self-built image
 
@@ -128,8 +131,9 @@ ensure_cached() {
 }
 ensure_cached "${DRAFT_MODEL}"
 
-DF_BLOCK_SIZE="${DF_BLOCK_SIZE:-7}"
+DF_BLOCK_SIZE="${DF_BLOCK_SIZE:-4}"
 DF_DRAFT_WINDOW="${DF_DRAFT_WINDOW:-}"
+[[ "${DF_DRAFT_WINDOW}" == "off" || "${DF_DRAFT_WINDOW}" == "0" ]] && DF_DRAFT_WINDOW=""
 DF_DRAFT_ATTN="${DF_DRAFT_ATTN:-}"
 if ! [[ "${DF_BLOCK_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
   echo "DF_BLOCK_SIZE must be a positive integer, got '${DF_BLOCK_SIZE}'"; exit 1
@@ -139,23 +143,20 @@ EXTRA_ARGS="--speculative-algorithm DFLASH \
 --speculative-draft-model-path ${DRAFT_MODEL}${DRAFT_REVISION:+ --speculative-draft-model-revision ${DRAFT_REVISION}} \
 --speculative-num-draft-tokens ${DF_BLOCK_SIZE}"
 
-# Draft KV bytes per target token: 3 layers x 2 (K,V) x 4 KV heads x 128 dim
+# Draft KV bytes per target token: 6 layers x 2 (K,V) x 8 KV heads x 128 dim
 # x dtype bytes (fp8 = 1, follows --kv-cache-dtype; fa4 forces bf16 = 2).
-# (transformer_layer_config in the draft's config.json: num_hidden_layers=3,
-# num_key_value_heads=4, head_dim=128.)
+# (draft config.json: num_hidden_layers=6, num_key_value_heads=8, head_dim=128.)
 DRAFT_KV_DTYPE_BYTES=1
 if [[ -n "${DF_DRAFT_ATTN}" ]]; then
   EXTRA_ARGS+=" --speculative-draft-attention-backend ${DF_DRAFT_ATTN}"
   [[ "${DF_DRAFT_ATTN}" == "fa4" ]] && DRAFT_KV_DTYPE_BYTES=2
 fi
-DRAFT_KV_BYTES_PER_TOKEN=$(( 3 * 2 * 4 * 128 * DRAFT_KV_DTYPE_BYTES ))
+DRAFT_KV_BYTES_PER_TOKEN=$(( 6 * 2 * 8 * 128 * DRAFT_KV_DTYPE_BYTES ))
 if [[ -n "${DF_DRAFT_WINDOW}" ]]; then
   if ! [[ "${DF_DRAFT_WINDOW}" =~ ^[0-9]+$ ]] || (( DF_DRAFT_WINDOW < DF_BLOCK_SIZE )); then
     echo "DF_DRAFT_WINDOW must be an integer >= DF_BLOCK_SIZE (${DF_BLOCK_SIZE}), got '${DF_DRAFT_WINDOW}'"; exit 1
   fi
   EXTRA_ARGS+=" --speculative-draft-window-size ${DF_DRAFT_WINDOW}"
-  # Compact cache: draft KV is bounded per request, not per target token.
-  DRAFT_KV_BYTES_PER_TOKEN=0
 fi
 EXTRA_ARGS+=" ${DF_EXTRA:-}"
 export EXTRA_ARGS
@@ -163,7 +164,7 @@ export EXTRA_ARGS
 export SPEC_LABEL="DFLASH ${DRAFT_MODEL} (block ${DF_BLOCK_SIZE}${DF_DRAFT_WINDOW:+, draft window ${DF_DRAFT_WINDOW}}${DF_DRAFT_ATTN:+, draft attn ${DF_DRAFT_ATTN}})"
 export SPEC_DRAFT_TOKENS="${DF_BLOCK_SIZE}"
 export DRAFT_KV_BYTES_PER_TOKEN
-export DRAFT_WEIGHTS_GIB="${DRAFT_WEIGHTS_GIB:-1.7}"
+export DRAFT_WEIGHTS_GIB="${DRAFT_WEIGHTS_GIB:-1.0}"
 export MAMBA_RADIX_STRATEGY="${DF_MAMBA_STRATEGY:-${MAMBA_RADIX_STRATEGY:-extra_buffer_lazy}}"
 
 echo "DFlash mode: EXTRA_ARGS=${EXTRA_ARGS}"

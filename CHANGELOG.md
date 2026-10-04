@@ -2,6 +2,48 @@
 
 All notable changes to this project are documented here. Dates are commit dates.
 
+## 2026-10-04 — 12 full-context streams at 0.92, `fill` pool mode
+
+- `MEM_FRACTION_STATIC` 0.85 → 0.92, `MAX_CONCURRENT_REQUESTS` 24 → 12,
+  `MAMBA_POOL_MODE` ratio → new `fill`: KV capped at 12 × 262144 and the
+  rest of the budget becomes GDN prefix-cache slots (`POOL_OVERHEAD_GIB`
+  7.1, measured; `FILL_MARGIN_GIB` 0.5). Boot: 3,145,776-token KV pool,
+  374 GDN slots, ~7–8 GB `MemAvailable` (auto/pin at 0.90: 48 slots,
+  ~18 GB free). Measured alternatives at 0.93: auto 13.6 full contexts
+  (~4 GB free), ratio 3.51 8.5 full contexts with 1,032 GDN slots.
+- The DFlash draft window stays off by default: with
+  `--speculative-draft-window-size 4096` this image still allocates the
+  full draft KV pool (25.5 GB for 2.23M tokens), so it saved no memory.
+- Pool estimate fix: start.sh no longer counts draft KV as 0 when
+  `DF_DRAFT_WINDOW` is set; the printed KV pool now matches SGLang.
+
+## 2026-10-03 — adopt sparkrun recipe defaults
+
+- Image → `lmsysorg/sglang:dev-cu13` @ `sha256:035f29e9…` (main `65f759144`).
+- `MAX_CONCURRENT_REQUESTS` 2 → 24, `MEM_FRACTION_STATIC` 0.5 → 0.85,
+  `CHUNKED_PREFILL` 8192 → 4096, `MAMBA_POOL_MODE` auto → ratio with
+  `MAMBA_FULL_MEMORY_RATIO=3.51`; `SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1`
+  always set; `DROP_CACHES=1` drops the page cache before launch.
+  Boot: 1.94M-token KV pool, 907 GDN slots, ~13 GB `MemAvailable`.
+- New `LOAD_FORMAT` (default `auto`). The recipe's `fastsafetensors`
+  (pip-installed at launch) loads in 18 s vs 113 s but measured 45 GB vs
+  24.4 GB for the target, shrinking the KV pool to 1.27M tokens, so it is
+  opt-in.
+- Concurrency-1 decode unchanged on the new image (112.7 tok/s, DFlash 4).
+
+## 2026-10-03 — switch DFlash2 draft
+
+- `DRAFT_MODEL` / `DRAFT_REVISION` →
+  [`jzinno/Ornith-1.5-35B-A3B-DFlash2`](https://huggingface.co/jzinno/Ornith-1.5-35B-A3B-DFlash2)
+  @ `9b4852c05fd00b672b7434b1bb105bc03c8682b0` (BF16, 6 layers / 8 KV
+  heads / dense FFN, 4096 sliding window).
+- `DF_BLOCK_SIZE` 7 → 4 (sparkrun recipe; benchmarked vs 10 at concurrency 1),
+  `DRAFT_KV_BYTES_PER_TOKEN` 3 KB → 12 KB (fp8), `DRAFT_WEIGHTS_GIB`
+  1.7 → 1.0 (measured: 0.97 GB draft, 24.27 GB target at load).
+- `start.sh` now passes `--moe-runner-backend ${MOE_RUNNER_BACKEND}`
+  (default `flashinfer_cutlass`): `auto` picked `flashinfer_trtllm` on
+  SM121, which crashes on NVFP4 MoE.
+
 ## 2026-10-02 — initial setup
 
 Bootstrapped from
