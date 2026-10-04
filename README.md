@@ -2,15 +2,15 @@
 
 Ready-to-run scripts to serve **[Ornith-1.5-35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-NVFP4)** (ornith-ai ModelOpt NVFP4) with **[SGLang](https://docs.sglang.io)** in Docker on an NVIDIA DGX Spark (GB10, 128 GB unified memory). Three decode modes are available:
 
-| Script | Decode mode | Best for |
-|---|---|---|
-| `./start-dflash.sh` | **DFlash2** speculative decoding ([`jzinno/Ornith-1.5-35B-A3B-DFlash2`](https://huggingface.co/jzinno/Ornith-1.5-35B-A3B-DFlash2), 4 draft tokens) | **Recommended to try first.** Fastest per stream at low concurrency, pending validation on this checkpoint |
-| `./start-mtp.sh` | MTP speculative decoding (the checkpoint's built-in head, 3 steps) | Context above 262K (YaRN), which DFlash doesn't support |
-| `./start.sh` | Plain decoding (no speculation) | Many concurrent streams (dozens to hundreds) |
+| Script | Decode mode | Full 262K streams | Best for |
+|---|---|---:|---|
+| `./start-mtp.sh` | MTP speculative decoding (the checkpoint's built-in head, 3 steps, no extra download) | 26 | **Recommended default.** Highest total throughput (613 tok/s code, 497 mixed at 26 streams), near-DFlash speed per stream. Also the only spec mode that supports context above 262K (YaRN). |
+| `./start-dflash.sh` | **DFlash2** speculative decoding ([`jzinno/Ornith-1.5-35B-A3B-DFlash2`](https://huggingface.co/jzinno/Ornith-1.5-35B-A3B-DFlash2), 4 draft tokens) | 12 | Fastest single stream on code (132 tok/s) and at 2–8 streams; fewer full-context streams because the draft KV costs 12 KB/token. |
+| `./start.sh` | Plain decoding (no speculation) | 30 | Most full-context streams; slowest per stream (~81–83 tok/s single-stream). |
 
 All three serve an OpenAI-compatible API on port **8888** with the model name **`ornith-1.5-35b-a3b-sglang`**. They share one container name, so only one can run at a time.
 
-> This repo was bootstrapped from [`Qwen3.6-35b-SGLang-DGX-Spark`](https://github.com/anubhavgupta/Qwen3.6-35b-SGLang-DGX-Spark), retargeted to Ornith-1.5-35B-A3B (same 40-layer hybrid-GDN MoE text backbone shape as Qwen3.6-35B-A3B, confirmed from both checkpoints' `config.json`s). The pool-sizing constants that depend only on that shared shape carry over; the ones that depend on actual weight size or the DFlash2 draft's shape were recomputed from each HF repo's `config.json` / file sizes but **not yet measured on this box** — see `numbers.md` and the comments next to each default in `start.sh` / `start-dflash.sh`.
+> This repo was bootstrapped from [`Qwen3.6-35b-SGLang-DGX-Spark`](https://github.com/anubhavgupta/Qwen3.6-35b-SGLang-DGX-Spark), retargeted to Ornith-1.5-35B-A3B (same 40-layer hybrid-GDN MoE text backbone shape as Qwen3.6-35B-A3B, confirmed from both checkpoints' `config.json`s). The pool sizes `start.sh` computes have been checked against real boots of all three modes on this box (see [Benchmark results](#benchmark-results-gb10)).
 
 ## Benchmark results (GB10)
 
