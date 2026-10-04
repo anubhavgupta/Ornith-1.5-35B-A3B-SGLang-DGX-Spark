@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. Dates are commit dates.
 
+## 2026-10-04 — Concurrency benchmarks, env comments
+
+- README: concurrency benchmark table. No-spec (1–30 streams) peaks at
+  470 tok/s total at 30; DFlash (1–12 streams) gives 93 tok/s single-stream
+  and 346 tok/s total at 12.
+- `.env.dflash` and `.env.no-spec`: every flag now has a comment explaining
+  what it does. Values unchanged.
+
 ## 2026-10-04 — `.env.no-spec`
 
 - New tracked `.env.no-spec`: 30 × 262K full-context streams at 0.92 in

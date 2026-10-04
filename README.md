@@ -70,7 +70,34 @@ All scripts use `lmsysorg/sglang:dev-cu13` (the sparkrun recipe's image), pinned
 
 ## Benchmark results (GB10)
 
-Not yet run for this checkpoint — see [`numbers.md`](numbers.md) for the sweep methodology carried over from the Qwen3.6 setup this repo is based on, and what needs re-measuring (`WEIGHTS_GIB`, `DRAFT_WEIGHTS_GIB`, GDN pool constants, and throughput/capacity numbers are all checkpoint-specific).
+Measured 2026-10-04 on DGX Spark (GB10, image dev-cu13 @ 035f29e9), each
+config booted from its tracked profile. Method: N simultaneous streaming
+chat requests, 512 output tokens each (greedy, `ignore_eos`, thinking off),
+mixed chat/code/math prompts with unique prefixes (no prefix-cache hits).
+Total tok/s = all output tokens / wall time; per-stream tok/s = mean decode
+rate after the first token; TTFT = mean time to first token.
+
+| Concurrency | No-spec total tok/s | No-spec per-stream | No-spec TTFT | DFlash total tok/s | DFlash per-stream | DFlash TTFT | DFlash accept len |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1  | 82  | 83 | 0.08 s | **93**  | **94** | 0.06 s | 2.32 |
+| 2  | 125 | 63 | 0.15 s | **138** | **85** | 0.32 s | 2.64 |
+| 4  | 184 | 47 | 0.27 s | **197** | **60** | 0.33 s | 2.60 |
+| 8  | 258 | 33 | 0.24 s | **294** | **44** | 0.22 s | 2.80 |
+| 12 | —   | —  | —      | **346** | **34** | 0.24 s | 2.80 |
+| 30 | **470** | 16 | 0.38 s | — | — | — | — |
+
+- **No-spec** (`./start.sh`, `.env.no-spec`): 30 × 262K full-context
+  streams, 165 GDN slots. Best for aggregate throughput.
+- **DFlash** (`./start-dflash.sh`, `.env.dflash`, 4 draft tokens): 12 × 262K
+  full-context streams (the draft KV costs 12 KB/token), 374 GDN slots.
+  Per-stream speed is 13–35% higher than no-spec at the same concurrency;
+  lowest `MemAvailable` during the sweep was 6.4 GB.
+- Accept length = generated tokens / verify steps from the Prometheus
+  metrics. It varies with the prompt: ~2.3 for a single chat-style prompt,
+  ~2.8 with the full mixed set.
+
+See [`numbers.md`](numbers.md) for the sweep methodology carried over from
+the Qwen3.6 setup.
 
 ## Memory safety
 
