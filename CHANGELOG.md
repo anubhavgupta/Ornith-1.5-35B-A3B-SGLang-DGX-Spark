@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Dates are commit dates.
 
+## 2026-10-04 — `.env.dflash`
+
+- New tracked `.env.dflash` with the tuned DFlash config (12 × 262K,
+  0.92, `fill`, 4 draft tokens). `start-dflash.sh` loads it automatically
+  after `.env`; shell env and `.env` still win.
+
 ## 2026-10-04 — 12 full-context streams at 0.92, `fill` pool mode
 
 - `MEM_FRACTION_STATIC` 0.85 → 0.92, `MAX_CONCURRENT_REQUESTS` 24 → 12,

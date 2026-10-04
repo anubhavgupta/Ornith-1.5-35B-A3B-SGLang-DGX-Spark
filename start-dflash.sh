@@ -42,6 +42,24 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Settings: shell env > ./.env > ./.env.dflash (tracked, the tuned DFlash
+# config) > start.sh defaults. Each file only fills variables still unset;
+# same parser as start.sh's .env loader.
+load_env_file() {
+  [[ -f "$1" ]] || return 0
+  local key value
+  while IFS='=' read -r key value || [[ -n "${key}" ]]; do
+    key="${key%$'\r'}"; value="${value%$'\r'}"
+    key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
+    [[ -z "${key}" || "${key}" == \#* ]] && continue
+    if [[ -z "${!key:-}" ]]; then
+      export "${key}=${value}"
+    fi
+  done < "$1"
+}
+load_env_file "${SCRIPT_DIR}/.env"
+load_env_file "${SCRIPT_DIR}/.env.dflash"
+
 # Ensure the draft (and only the draft) is cached where the container reads it.
 HF_CACHE="${SCRIPT_DIR}/.cache/huggingface/hub"
 mkdir -p "${HF_CACHE}"

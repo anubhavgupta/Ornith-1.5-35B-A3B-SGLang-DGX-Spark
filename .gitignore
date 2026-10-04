@@ -6,6 +6,7 @@
 !README.md
 !CHANGELOG.md
 !.env.sample
+!.env.dflash
 !LICENSE
 !.gitignore
 !bench/
