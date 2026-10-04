@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. Dates are commit dates.
 
+## 2026-10-04 — `.env.mtp`, MTP benchmarks, fill-mode guard
+
+- New tracked `.env.mtp`: 26 × 262K full-context streams at 0.92 in `fill`
+  mode with the checkpoint's own MTP head (3 steps, 4 draft tokens).
+  `start-mtp.sh` loads it after `.env`. Boot: 6,815,848-token KV pool,
+  171 GDN slots, ~5.2 GB `MemAvailable`.
+- README: MTP columns in both benchmark tables. MTP at 26 streams gives the
+  highest total throughput (613 tok/s code, 497 tok/s mixed).
+- `start.sh` `fill` mode now refuses to start when N full contexts don't fit
+  the budget, and prints the max that does. It used to clamp GDN slots to
+  the pin floor and over-allocate (MTP at 28 left 1.8 GB `MemAvailable`).
+
 ## 2026-10-04 — Concurrency benchmarks, env comments
 
 - README: concurrency benchmark table. No-spec (1–30 streams) peaks at

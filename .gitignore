@@ -8,6 +8,7 @@
 !.env.sample
 !.env.dflash
 !.env.no-spec
+!.env.mtp
 !LICENSE
 !.gitignore
 !bench/

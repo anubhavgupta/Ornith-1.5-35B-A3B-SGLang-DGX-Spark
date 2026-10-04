@@ -330,20 +330,29 @@ case "${MAMBA_POOL_MODE}" in
 esac
 if [[ "${MAMBA_POOL_MODE}" == "fill" ]]; then
   # Slots = (budget - overhead - margin - capped KV - D intermediate states
-  # per running request (+1 padding)) / slot size, minus the padding slot;
-  # never below the pin floor (concurrency x S).
+  # per running request (+1 padding)) / slot size, minus the padding slot.
+  # Refuses to start if that is below the pin floor (concurrency x S).
   MAMBA_PIN_FLOOR=$(( MAX_CONCURRENT_REQUESTS * MAMBA_SLOTS_PER_REQ ))
-  read -r MAMBA_CACHE_SIZE MAMBA_FILL_GIB < <(awk \
+  read -r MAMBA_CACHE_SIZE MAMBA_FILL_GIB MAMBA_FILL_MAX_N < <(awk \
     -v rest="${MAMBA_REST_GIB}" -v oh="${POOL_OVERHEAD_GIB}" -v m="${FILL_MARGIN_GIB}" \
     -v N="${MAX_CONCURRENT_REQUESTS}" -v C="${CONTEXT_LENGTH}" -v D="${SPEC_DRAFT_TOKENS}" \
     -v kv="${KV_BYTES_PER_TOKEN}" -v dkv="${DRAFT_KV_BYTES_PER_TOKEN}" -v st="${MAMBA_STATE_BYTES_PER_SLOT}" \
-    -v floor="${MAMBA_PIN_FLOOR}" 'BEGIN{
+    -v S="${MAMBA_SLOTS_PER_REQ}" -v floor="${MAMBA_PIN_FLOOR}" 'BEGIN{
       G = 1073741824
       left = rest - oh - m - N * (C + D) * (kv + dkv) / G - (N + 1) * D * st / G
       n = int(left * G / st) - 1
-      if (n < floor) n = floor
-      printf "%d %.2f\n", n, n * st / G
+      # Largest N whose KV + intermediate states + pin floor fit the budget.
+      per = ((C + D) * (kv + dkv) + (D + S) * st) / G
+      maxn = int((rest - oh - m - (D + 1) * st / G) / per)
+      printf "%d %.2f %d\n", n, n * st / G, maxn
     }')
+  if (( MAMBA_CACHE_SIZE < MAMBA_PIN_FLOOR )); then
+    # Clamping to the floor here would over-allocate past MEM_FRACTION_STATIC
+    # (measured: MTP N=28 at 0.92 left 1.8 GB MemAvailable), so refuse.
+    echo "MAMBA_POOL_MODE=fill: ${MAX_CONCURRENT_REQUESTS} x ${CONTEXT_LENGTH}-token contexts do not fit the ~${MAMBA_REST_GIB} GiB budget"
+    echo "  (max ~${MAMBA_FILL_MAX_N} at MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC}). Lower MAX_CONCURRENT_REQUESTS or CONTEXT_LENGTH."
+    exit 1
+  fi
   MAMBA_POOL_ARGS=(--max-mamba-cache-size "${MAMBA_CACHE_SIZE}")
   MAMBA_POOL_DESC="fill: ${MAMBA_CACHE_SIZE} slots (~${MAMBA_FILL_GIB} GiB; ${MAMBA_PIN_FLOOR} for ${MAX_CONCURRENT_REQUESTS} x S=${MAMBA_SLOTS_PER_REQ}, rest prefix cache)"
 elif [[ "${MAMBA_POOL_MODE}" == "pin" ]]; then

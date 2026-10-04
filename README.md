@@ -56,11 +56,11 @@ curl http://127.0.0.1:8888/v1/chat/completions -H 'Content-Type: application/jso
 | `SAMPLING_TEMPERATURE` / `_TOP_P` / `_TOP_K` / `_MIN_P` / `_REPETITION_PENALTY` | `0.6` / `0.95` / `20` / `0.0` / `1.0` | Server default sampling. Applied by mounting a patched `generation_config.json` into the container; the host cache isn't changed. |
 | `CHAT_TEMPLATE_KWARGS` | `{"preserve_thinking": true}` | Server default chat-template kwargs; keys the client sends win |
 | `DF_BLOCK_SIZE` | `4` | DFlash draft tokens per step (4 vs 10 at concurrency 1: 10 is ~4% faster on average but ~15% slower on chat/prose) |
-| `MTP_STEPS` / `MTP_DRAFT` | `3` / `4` | MTP chain length (carried over from the Qwen3.6 setup; not yet swept for this checkpoint) |
+| `MTP_STEPS` / `MTP_DRAFT` | `3` / `4` | MTP chain length (the model card's recipe; accept length ~2.8 mixed, ~3.2 code). Not swept further. |
 | `EXTRA_ARGS` | — | Extra SGLang flags, appended last |
 | `DOCKER_ENV` | — | Extra container env, e.g. `SGLANG_FLASHINFER_WORKSPACE_SIZE=1073741824` (needed for spec modes above ~150 streams) |
 
-On every start, the script prints the derived state pool and KV cache sizes, and warns if `MAX_CONCURRENT_REQUESTS × CONTEXT_LENGTH` won't fit in the memory budget.
+On every start, the script prints the derived state pool and KV cache sizes, and warns if `MAX_CONCURRENT_REQUESTS × CONTEXT_LENGTH` won't fit in the memory budget. In `fill` mode it refuses to start instead, and prints the max that fits.
 
 ## Image
 
@@ -73,49 +73,62 @@ All scripts use `lmsysorg/sglang:dev-cu13` (the sparkrun recipe's image), pinned
 ### Code-only requests
 
 > Every stream has a full 262K context reserved: the server is booted so all
-> concurrent requests (30 no-spec, 12 DFlash) can reach 262,144 tokens at
-> once. The test requests themselves are short (one-line prompt + 512 output
-> tokens), so these are short-context decode speeds; decode at very long
-> contexts will be slower.
+> concurrent requests (30 no-spec, 26 MTP, 12 DFlash) can reach 262,144
+> tokens at once. The test requests themselves are short (one-line prompt +
+> 512 output tokens), so these are short-context decode speeds; decode at
+> very long contexts will be slower.
 
 8 code prompts: Python, Go, TypeScript/React, Rust, C++, SQL, Bash, Java/Spring.
 
-| Concurrency | No-spec total tok/s | No-spec per-stream | No-spec TTFT | DFlash total tok/s | DFlash per-stream | DFlash TTFT | DFlash accept len |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1  | 81  | 81 | 0.07 s | **130** | **132** | 0.07 s | 3.30 |
-| 2  | 123 | 62 | 0.12 s | **196** | **101** | 0.09 s | 3.30 |
-| 4  | 190 | 48 | 0.14 s | **259** | **73**  | 0.15 s | 3.13 |
-| 8  | 266 | 34 | 0.18 s | **364** | **49**  | 0.17 s | 3.19 |
-| 12 | —   | —  | —      | **456** | **41**  | 0.19 s | 3.14 |
-| 30 | **525** | 18 | 0.28 s | — | — | — | — |
+| Concurrency | No-spec total tok/s | No-spec per-stream | MTP total tok/s | MTP per-stream | MTP accept len | DFlash total tok/s | DFlash per-stream | DFlash accept len |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1  | 81  | 81 | 121 | 123 | 3.22 | **130** | **132** | 3.30 |
+| 2  | 123 | 62 | 179 | 95  | 3.22 | **196** | **101** | 3.30 |
+| 4  | 190 | 48 | 251 | 67  | 3.11 | **259** | **73**  | 3.13 |
+| 8  | 266 | 34 | 341 | 47  | 3.16 | **364** | **49**  | 3.19 |
+| 10 | —   | —  | 394 | 42  | 3.13 | —   | —   | —    |
+| 12 | —   | —  | —   | —   | —    | 456 | 41  | 3.14 |
+| 26 | —   | —  | **613** | 25 | 3.16 | — | — | — |
+| 30 | 525 | 18 | —   | —   | —    | —   | —   | —    |
 
-Code drafts much better (accept length ~3.1–3.3 vs ~2.3–2.8 mixed): DFlash
-per-stream speed is 46–63% higher than no-spec, and DFlash at 12 streams
-(456 tok/s) comes close to no-spec at 30 (525 tok/s).
+TTFT 0.07–0.30 s across all code runs.
+
+- Code drafts well (accept length ~3.1–3.3): DFlash per-stream speed is
+  46–63% above no-spec, MTP 38–53%. DFlash is 4–9% ahead of MTP per stream.
+- Highest total throughput: **MTP at 26 streams, 613 tok/s**, 17% above
+  no-spec at 30 (525 tok/s).
 
 ### Mixed requests (prose + code + math)
 
 > Every stream has a full 262K context reserved: the server is booted so all
-> concurrent requests (30 no-spec, 12 DFlash) can reach 262,144 tokens at
-> once. The test requests themselves are short (one-line prompt + 512 output
-> tokens), so these are short-context decode speeds; decode at very long
-> contexts will be slower.
+> concurrent requests (30 no-spec, 26 MTP, 12 DFlash) can reach 262,144
+> tokens at once. The test requests themselves are short (one-line prompt +
+> 512 output tokens), so these are short-context decode speeds; decode at
+> very long contexts will be slower.
 
 8 prompts: 4 prose (explanation, essay, email, technical comparison),
 2 code (Python, Go), 2 math (equation, induction proof). At concurrency 1
 only the first prose prompt runs, so rows 1–4 lean toward prose; from 8 up
 the set is evenly covered.
 
-| Concurrency | No-spec total tok/s | No-spec per-stream | No-spec TTFT | DFlash total tok/s | DFlash per-stream | DFlash TTFT | DFlash accept len |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1  | 82  | 83 | 0.08 s | **93**  | **94** | 0.06 s | 2.32 |
-| 2  | 125 | 63 | 0.15 s | **138** | **85** | 0.32 s | 2.64 |
-| 4  | 184 | 47 | 0.27 s | **197** | **60** | 0.33 s | 2.60 |
-| 8  | 258 | 33 | 0.24 s | **294** | **44** | 0.22 s | 2.80 |
-| 12 | —   | —  | —      | **346** | **34** | 0.24 s | 2.80 |
-| 30 | **470** | 16 | 0.38 s | — | — | — | — |
+| Concurrency | No-spec total tok/s | No-spec per-stream | MTP total tok/s | MTP per-stream | MTP accept len | DFlash total tok/s | DFlash per-stream | DFlash accept len |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1  | 82  | 83 | **101** | **102** | 2.61 | 93  | 94  | 2.32 |
+| 2  | 125 | 63 | **139** | 80  | 2.68 | 138 | **85** | 2.64 |
+| 4  | 184 | 47 | 189 | 58  | 2.64 | **197** | **60** | 2.60 |
+| 8  | 258 | 33 | 271 | 40  | 2.80 | **294** | **44** | 2.80 |
+| 10 | —   | —  | 297 | 35  | 2.78 | —   | —   | —    |
+| 12 | —   | —  | —   | —   | —    | 346 | 34  | 2.80 |
+| 26 | —   | —  | **497** | 23 | 2.78 | — | — | — |
+| 30 | 470 | 16 | —   | —   | —    | —   | —   | —    |
 
-DFlash per-stream speed is 13–35% higher than no-spec at the same concurrency.
+TTFT 0.06–0.43 s across all mixed runs.
+
+- MTP and DFlash are close: MTP wins single-stream (102 vs 94 tok/s),
+  DFlash is slightly ahead from 2 to 8 streams. Per stream, MTP is
+  21–27% above no-spec and DFlash 13–35%.
+- Highest total throughput: **MTP at 26 streams, 497 tok/s**, 6% above
+  no-spec at 30 (470 tok/s).
 
 ### Method
 
@@ -128,7 +141,12 @@ token; TTFT = mean time to first token. Request *i* gets prompt *i* mod 8
 from the set being tested.
 
 - **No-spec** (`./start.sh`, `.env.no-spec`): 30 × 262K full-context
-  streams, 165 GDN slots. Best for aggregate throughput.
+  streams, 165 GDN slots.
+- **MTP** (`./start-mtp.sh`, `.env.mtp`, the checkpoint's own MTP head,
+  3 steps / 4 draft tokens): 26 × 262K full-context streams (the MTP draft
+  KV costs only 1 KB/token), 171 GDN slots, ~5.2 GB `MemAvailable`. 26 is
+  the max at 0.92. Rows 1–10 were measured on a c=10 boot (1,670 GDN
+  slots); the slot count does not affect these short-prompt speeds.
 - **DFlash** (`./start-dflash.sh`, `.env.dflash`, 4 draft tokens): 12 × 262K
   full-context streams (the draft KV costs 12 KB/token), 374 GDN slots.
   Lowest `MemAvailable` during the sweeps was 6.4 GB.
@@ -154,6 +172,7 @@ GB10's GPU and OS share one memory pool, and **GPU allocations can't be swapped*
 | `.env.sample` | All settings, documented |
 | `.env.no-spec` | Tuned no-spec config, auto-loaded by `./start.sh` run directly (30 × 262K, 0.92, `fill`) |
 | `.env.dflash` | Tuned DFlash config, auto-loaded by `start-dflash.sh` after `.env` (12 × 262K, 0.92, `fill`) |
+| `.env.mtp` | Tuned MTP config, auto-loaded by `start-mtp.sh` after `.env` (26 × 262K, 0.92, `fill`) |
 | `numbers.md` | Measurement methodology and what's been carried over vs. still needs re-measuring for this checkpoint |
 
 ## Links

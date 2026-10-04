@@ -27,6 +27,24 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Settings: shell env > ./.env > ./.env.mtp (tracked, the tuned MTP config)
+# > start.sh defaults. Each file only fills variables still unset; same
+# parser as start.sh's .env loader.
+load_env_file() {
+  [[ -f "$1" ]] || return 0
+  local key value
+  while IFS='=' read -r key value || [[ -n "${key}" ]]; do
+    key="${key%$'\r'}"; value="${value%$'\r'}"
+    key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
+    [[ -z "${key}" || "${key}" == \#* ]] && continue
+    if [[ -z "${!key:-}" ]]; then
+      export "${key}=${value}"
+    fi
+  done < "$1"
+}
+load_env_file "${SCRIPT_DIR}/.env"
+load_env_file "${SCRIPT_DIR}/.env.mtp"
+
 MTP_STEPS="${MTP_STEPS:-3}"
 MTP_DRAFT="${MTP_DRAFT:-4}"
 if ! [[ "${MTP_STEPS}" =~ ^[1-9][0-9]*$ && "${MTP_DRAFT}" =~ ^[1-9][0-9]*$ ]]; then
