@@ -72,6 +72,12 @@ All scripts use `lmsysorg/sglang:dev-cu13` (the sparkrun recipe's image), pinned
 
 ### Code-only requests
 
+> Every stream has a full 262K context reserved: the server is booted so all
+> concurrent requests (30 no-spec, 12 DFlash) can reach 262,144 tokens at
+> once. The test requests themselves are short (one-line prompt + 512 output
+> tokens), so these are short-context decode speeds; decode at very long
+> contexts will be slower.
+
 8 code prompts: Python, Go, TypeScript/React, Rust, C++, SQL, Bash, Java/Spring.
 
 | Concurrency | No-spec total tok/s | No-spec per-stream | No-spec TTFT | DFlash total tok/s | DFlash per-stream | DFlash TTFT | DFlash accept len |
@@ -88,6 +94,12 @@ per-stream speed is 46–63% higher than no-spec, and DFlash at 12 streams
 (456 tok/s) comes close to no-spec at 30 (525 tok/s).
 
 ### Mixed requests (prose + code + math)
+
+> Every stream has a full 262K context reserved: the server is booted so all
+> concurrent requests (30 no-spec, 12 DFlash) can reach 262,144 tokens at
+> once. The test requests themselves are short (one-line prompt + 512 output
+> tokens), so these are short-context decode speeds; decode at very long
+> contexts will be slower.
 
 8 prompts: 4 prose (explanation, essay, email, technical comparison),
 2 code (Python, Go), 2 math (equation, induction proof). At concurrency 1
