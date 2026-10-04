@@ -87,6 +87,7 @@ GB10's GPU and OS share one memory pool, and **GPU allocations can't be swapped*
 | `start-dflash.sh` / `start-mtp.sh` | Thin wrappers that add the speculative-decoding flags, then call `start.sh` |
 | `stop.sh` | Stops the container (idempotent) |
 | `.env.sample` | All settings, documented |
+| `.env.no-spec` | Tuned no-spec config, auto-loaded by `./start.sh` run directly (30 × 262K, 0.92, `fill`) |
 | `.env.dflash` | Tuned DFlash config, auto-loaded by `start-dflash.sh` after `.env` (12 × 262K, 0.92, `fill`) |
 | `numbers.md` | Measurement methodology and what's been carried over vs. still needs re-measuring for this checkpoint |
 

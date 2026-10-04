@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. Dates are commit dates.
 
+## 2026-10-04 — `.env.no-spec`
+
+- New tracked `.env.no-spec`: 30 × 262K full-context streams at 0.92 in
+  `fill` mode without speculative decoding. `start.sh` loads it after `.env`
+  only when run directly (no spec wrapper). Boot: 7,864,320-token KV pool,
+  165 GDN slots, ~9 GB `MemAvailable`.
+
 ## 2026-10-04 — `.env.dflash`
 
 - New tracked `.env.dflash` with the tuned DFlash config (12 × 262K,

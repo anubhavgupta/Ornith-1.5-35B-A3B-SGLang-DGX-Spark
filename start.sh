@@ -76,8 +76,12 @@ set -euo pipefail
 
 # Load optional .env overrides (MODEL_ID, YARN, CONTEXT_LENGTH, MAX_CONCURRENT_REQUESTS).
 # Shell env vars already set win; .env fills the gaps; defaults apply last.
+# Run directly (no spec wrapper has set SPEC_LABEL), ./.env.no-spec (tracked,
+# the tuned no-spec config) is loaded after .env the same way.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+load_env_file() {
+  [[ -f "$1" ]] || return 0
+  local key value
   # `|| [[ -n "${key}" ]]` so a final line without a trailing newline is not dropped.
   while IFS='=' read -r key value || [[ -n "${key}" ]]; do
     # Tolerate CRLF files and surrounding whitespace, and skip indented comments —
@@ -88,8 +92,10 @@ if [[ -f "${SCRIPT_DIR}/.env" ]]; then
     if [[ -z "${!key:-}" ]]; then
       export "${key}=${value}"
     fi
-  done < "${SCRIPT_DIR}/.env"
-fi
+  done < "$1"
+}
+load_env_file "${SCRIPT_DIR}/.env"
+[[ -z "${SPEC_LABEL:-}" ]] && load_env_file "${SCRIPT_DIR}/.env.no-spec"
 
 MODEL_ID="${MODEL_ID:-ornith-ai/Ornith-1.5-35B-A3B-NVFP4}"
 
